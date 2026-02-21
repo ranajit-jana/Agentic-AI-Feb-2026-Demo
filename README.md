@@ -100,8 +100,82 @@ The active provider is controlled by `LLM_PROVIDER` in your `.env` file.
 ```
 Agentic AI Feb 2026/
 ├── main.py            # Main entry point
+├── runnable-demo.py   # LCEL two-chain pipeline demo (see below)
+├── router-chain.py    # LCEL router chain demo (see below)
 ├── requirements.txt   # Core dependencies
 ├── .env               # Your API keys (not committed)
 ├── .env.example       # Template for .env
 └── README.md          # This file
 ```
+
+---
+
+## LCEL Runnable Demo (`runnable-demo.py`)
+
+Demonstrates **LangChain Expression Language (LCEL)** by wiring two independent chains into a single pipeline using the `|` operator and `RunnablePassthrough`.
+
+### How it works
+
+```
+topic ──► [Story Chain] ──► story ──► [Review Chain] ──► review
+```
+
+| Chain | Model | Temperature | Role |
+|-------|-------|-------------|------|
+| Story Creator | GPT-5.2 | 0.8 | Generates a 3–4 paragraph short story from a given topic |
+| Content Reviewer | GPT-4o | 0.2 | Reviews the story for family-friendliness and returns a verdict, reason, and suggestions |
+
+### Key LCEL concepts used
+
+- **`prompt | llm | parser`** — basic chain composition
+- **`RunnablePassthrough.assign()`** — adds new keys to the passing dict without dropping existing ones, allowing both `topic` and `story` to remain available downstream
+- **`RunnableLambda`** — wraps a plain Python function so it can participate in the pipeline
+
+### Running the demo
+
+```bash
+python runnable-demo.py
+```
+
+The demo runs with the built-in topic *"a young wizard who discovers a hidden library beneath the ocean"*. Change the argument passed to `run_demo()` at the bottom of the file to try other topics.
+
+> **Note:** Requires `OPENAI_API_KEY` to be set in your `.env` file.
+
+---
+
+## LCEL Router Chain (`router-chain.py`)
+
+Demonstrates **conditional routing** in LCEL by classifying a user message and dispatching it to the appropriate specialist chain.
+
+### How it works
+
+```
+User message
+  → [Classifier Chain]  — returns "billing" | "support" | "general"
+  → [RunnableBranch]    — branches to the matching specialist chain
+  → [Billing / Support / General Chain]
+  → Response
+```
+
+| Chain | Role |
+|-------|------|
+| Classifier | Reads the message and outputs exactly one category label |
+| Billing | Handles payment questions, invoices, subscriptions, and refunds |
+| Support | Troubleshoots technical issues, bugs, and account problems |
+| General | Handles greetings, company info, and everything else |
+
+### Key LCEL concepts used
+
+- **`RunnableBranch`** — conditional branching; evaluates predicate lambdas in order and executes the first matching chain, with a fallback default
+- **`RunnablePassthrough.assign()`** — attaches the classifier result as `category` while keeping `message` in the dict
+- **`RunnableLambda`** — wraps the classifier chain invocation so it fits into the `assign()` call
+
+### Running the demo
+
+```bash
+python router-chain.py
+```
+
+The demo sends three test messages — one for each route — and prints the detected category and agent response for each.
+
+> **Note:** Requires `OPENAI_API_KEY` to be set in your `.env` file.
