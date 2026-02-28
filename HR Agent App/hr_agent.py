@@ -1,24 +1,27 @@
 """
 HR Management Agent — built with LangGraph
 Handles: Leave Management, Policy Q&A, Onboarding, Recruitment, Performance Reviews
+
+Employee data (employees, leave balances, leave requests) is stored in SQLite
+and served via the MCP server (hr_mcp_server.py).
+HR policies are also served via the MCP server as resources.
 """
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
 
 from dotenv import load_dotenv
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
@@ -28,68 +31,19 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 # Constants
 # ─────────────────────────────────────────────
 
-MODEL_NAME = "gpt-4o-mini"
+MODEL_NAME  = "gpt-4o-mini"
 TEMPERATURE = 0.2
 
 # ─────────────────────────────────────────────
-# Mock HR Database
-# ─────────────────────────────────────────────
-
-EMPLOYEES: dict[str, dict] = {
-    "E001": {
-        "name": "Alice Johnson",
-        "department": "Engineering",
-        "role": "Senior Engineer",
-        "manager": "E003",
-        "start_date": "2022-03-15",
-        "email": "alice.johnson@company.com",
-    },
-    "E002": {
-        "name": "Bob Smith",
-        "department": "Marketing",
-        "role": "Marketing Manager",
-        "manager": "E004",
-        "start_date": "2021-07-01",
-        "email": "bob.smith@company.com",
-    },
-    "E003": {
-        "name": "Carol White",
-        "department": "Engineering",
-        "role": "VP Engineering",
-        "manager": None,
-        "start_date": "2019-01-10",
-        "email": "carol.white@company.com",
-    },
-    "E004": {
-        "name": "David Brown",
-        "department": "Marketing",
-        "role": "CMO",
-        "manager": None,
-        "start_date": "2018-05-20",
-        "email": "david.brown@company.com",
-    },
-}
-
-LEAVE_BALANCES: dict[str, dict[str, int]] = {
-    "E001": {"annual": 15, "sick": 10, "personal": 3},
-    "E002": {"annual": 12, "sick": 10, "personal": 3},
-    "E003": {"annual": 20, "sick": 10, "personal": 5},
-    "E004": {"annual": 20, "sick": 10, "personal": 5},
-}
-
-LEAVE_REQUESTS: list[dict] = []
-
-# HR_POLICIES live in hr_mcp_server.py — fetched via MCP at runtime.
-
-# ─────────────────────────────────────────────
 # MCP Client Helper
+# All employee & policy data is fetched from hr_mcp_server.py
 # ─────────────────────────────────────────────
 
 _MCP_SERVER = str(Path(__file__).parent / "hr_mcp_server.py")
 
 
 async def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
-    """Spawn the MCP server as a subprocess and call a tool on it."""
+    """Spawn the MCP server as a subprocess and call a named tool."""
     server_params = StdioServerParameters(command="python3", args=[_MCP_SERVER])
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -98,15 +52,19 @@ async def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
             return result.content[0].text
 
 
+def _mcp(tool_name: str, **kwargs) -> str:
+    """Synchronous wrapper around _call_mcp_tool for use inside @tool functions."""
+    return asyncio.run(_call_mcp_tool(tool_name, kwargs))
+
 # ─────────────────────────────────────────────
 # State
 # ─────────────────────────────────────────────
 
 class HRState(TypedDict):
-    messages: Annotated[list, add_messages]
-    intent: str
+    messages:    Annotated[list, add_messages]
+    intent:      str
     employee_id: str | None
-    context: dict[str, Any]
+    context:     dict[str, Any]
 
 # ─────────────────────────────────────────────
 # Structured Output Model
@@ -128,24 +86,33 @@ class Intent(BaseModel):
     reasoning: str = Field(description="Brief reasoning for the classification")
 
 # ─────────────────────────────────────────────
-# HR Tools
+# HR Tools — Employee (via MCP → SQLite)
 # ─────────────────────────────────────────────
 
 @tool
-def check_leave_balance(employee_id: str) -> dict:
-    """Return the current leave balance for an employee.
+def get_employee_info(employee_id: str) -> str:
+    """Get profile information for an employee from the HR database.
 
     Args:
-        employee_id: The employee's ID (e.g. E001).
+        employee_id: Employee ID (e.g. E001, E002).
     """
-    if employee_id not in LEAVE_BALANCES:
-        return {"error": f"Employee {employee_id} not found"}
-    employee = EMPLOYEES.get(employee_id, {})
-    return {
-        "employee_id": employee_id,
-        "name": employee.get("name", "Unknown"),
-        "leave_balance": LEAVE_BALANCES[employee_id],
-    }
+    return _mcp("get_employee_info", employee_id=employee_id)
+
+
+@tool
+def list_employees() -> str:
+    """List all employees in the HR database."""
+    return _mcp("list_employees")
+
+
+@tool
+def check_leave_balance(employee_id: str) -> str:
+    """Return the current leave balance for an employee from the HR database.
+
+    Args:
+        employee_id: Employee ID (e.g. E001).
+    """
+    return _mcp("check_leave_balance", employee_id=employee_id)
 
 
 @tool
@@ -155,60 +122,28 @@ def submit_leave_request(
     start_date: str,
     end_date: str,
     reason: str = "",
-) -> dict:
-    """Submit a leave request for an employee.
+) -> str:
+    """Submit a leave request. Validates balance and persists to SQLite via MCP.
 
     Args:
-        employee_id: The employee's ID.
-        leave_type: Type of leave — annual, sick, or personal.
-        start_date: Start date in YYYY-MM-DD format.
-        end_date: End date in YYYY-MM-DD format.
-        reason: Optional reason for the leave.
+        employee_id: Employee ID (e.g. E001).
+        leave_type:  Type of leave — annual, sick, or personal.
+        start_date:  Start date in YYYY-MM-DD format.
+        end_date:    End date in YYYY-MM-DD format.
+        reason:      Optional reason for the leave.
     """
-    if employee_id not in EMPLOYEES:
-        return {"error": f"Employee {employee_id} not found"}
-    if leave_type not in ("annual", "sick", "personal"):
-        return {"error": f"Invalid leave type '{leave_type}'. Must be annual, sick, or personal."}
+    return _mcp(
+        "submit_leave_request",
+        employee_id=employee_id,
+        leave_type=leave_type,
+        start_date=start_date,
+        end_date=end_date,
+        reason=reason,
+    )
 
-    start = datetime.strptime(start_date, "%Y-%m-%d").date()
-    end = datetime.strptime(end_date, "%Y-%m-%d").date()
-    days = (end - start).days + 1
-
-    if days <= 0:
-        return {"error": "End date must be on or after start date."}
-
-    available = LEAVE_BALANCES.get(employee_id, {}).get(leave_type, 0)
-    if days > available:
-        return {
-            "error": (
-                f"Insufficient {leave_type} leave. "
-                f"Requested: {days} day(s), Available: {available} day(s)."
-            )
-        }
-
-    request_id = f"LR{len(LEAVE_REQUESTS) + 1:04d}"
-    request = {
-        "request_id": request_id,
-        "employee_id": employee_id,
-        "employee_name": EMPLOYEES[employee_id]["name"],
-        "leave_type": leave_type,
-        "start_date": start_date,
-        "end_date": end_date,
-        "days": days,
-        "reason": reason,
-        "status": "pending_approval",
-        "submitted_at": datetime.now().isoformat(),
-    }
-    LEAVE_REQUESTS.append(request)
-    LEAVE_BALANCES[employee_id][leave_type] -= days
-
-    return {
-        "success": True,
-        "request": request,
-        "message": f"Leave request {request_id} submitted. Awaiting manager approval.",
-        "remaining_balance": LEAVE_BALANCES[employee_id][leave_type],
-    }
-
+# ─────────────────────────────────────────────
+# HR Tools — Policy (via MCP)
+# ─────────────────────────────────────────────
 
 @tool
 def get_hr_policy(policy_topic: str) -> str:
@@ -218,24 +153,11 @@ def get_hr_policy(policy_topic: str) -> str:
         policy_topic: One of: remote_work, leave, performance,
                       code_of_conduct, compensation. Partial names accepted.
     """
-    return asyncio.run(
-        _call_mcp_tool("get_hr_policy", {"topic": policy_topic})
-    )
+    return _mcp("get_hr_policy", topic=policy_topic)
 
-
-@tool
-def get_employee_info(employee_id: str) -> dict:
-    """Get profile information about an employee.
-
-    Args:
-        employee_id: The employee's ID (e.g. E001).
-    """
-    if employee_id not in EMPLOYEES:
-        return {"error": f"Employee {employee_id} not found"}
-    info = EMPLOYEES[employee_id].copy()
-    info["employee_id"] = employee_id
-    return info
-
+# ─────────────────────────────────────────────
+# HR Tools — Generative (local, no DB needed)
+# ─────────────────────────────────────────────
 
 @tool
 def generate_onboarding_checklist(
@@ -247,8 +169,8 @@ def generate_onboarding_checklist(
 
     Args:
         employee_id: The new employee's ID.
-        start_date: Employee start date in YYYY-MM-DD format.
-        department: Department name for role-specific checklist items.
+        start_date:  Employee start date in YYYY-MM-DD format.
+        department:  Department name for role-specific items.
     """
     checklist: dict[str, list[str]] = {
         "week_1": [
@@ -295,9 +217,9 @@ def generate_onboarding_checklist(
 
     return {
         "employee_id": employee_id,
-        "start_date": start_date,
-        "department": department or "General",
-        "checklist": checklist,
+        "start_date":  start_date,
+        "department":  department or "General",
+        "checklist":   checklist,
     }
 
 
@@ -310,8 +232,8 @@ def generate_interview_questions(
     """Generate tailored interview questions for a role.
 
     Args:
-        role: Job title (e.g. Software Engineer, Marketing Manager).
-        level: Experience level — junior, mid, senior, or lead.
+        role:           Job title (e.g. Software Engineer, Marketing Manager).
+        level:          Experience level — junior, mid, senior, or lead.
         interview_type: Interview style — behavioral, technical, or cultural.
     """
     behavioral = [
@@ -357,32 +279,32 @@ def generate_interview_questions(
     ]
 
     role_key = role.lower()
-    tech_qs = technical_map.get(role_key, technical_map["default"])
+    tech_qs  = technical_map.get(role_key, technical_map["default"])
 
-    question_map = {
-        "behavioral": behavioral,
-        "technical": tech_qs,
-        "cultural": cultural,
-    }
-    questions = question_map.get(interview_type, behavioral)
+    question_map = {"behavioral": behavioral, "technical": tech_qs, "cultural": cultural}
+    questions    = question_map.get(interview_type, behavioral)
 
     if level in ("senior", "lead"):
         questions = questions + senior_extras[:2]
 
     return {
-        "role": role,
-        "level": level,
+        "role":           role,
+        "level":          level,
         "interview_type": interview_type,
-        "questions": questions,
-        "tip": "Use STAR (Situation, Task, Action, Result) prompts for follow-up depth.",
+        "questions":      questions,
+        "tip":            "Use STAR (Situation, Task, Action, Result) prompts for follow-up depth.",
     }
 
 
 HR_TOOLS = [
+    # Employee tools (MCP → SQLite)
+    get_employee_info,
+    list_employees,
     check_leave_balance,
     submit_leave_request,
+    # Policy tool (MCP)
     get_hr_policy,
-    get_employee_info,
+    # Generative tools (local)
     generate_onboarding_checklist,
     generate_interview_questions,
 ]
@@ -463,15 +385,15 @@ def classify_intent(state: HRState) -> dict:
 
     print(f"[HR Agent] Intent: {result.intent} | Employee ID: {result.employee_id}")
     return {
-        "intent": result.intent,
+        "intent":      result.intent,
         "employee_id": result.employee_id,
-        "context": {"reasoning": result.reasoning},
+        "context":     {"reasoning": result.reasoning},
     }
 
 
 def hr_agent_node(state: HRState) -> dict:
     """Main HR agent node — calls tools and builds a response."""
-    intent = state.get("intent", "general")
+    intent      = state.get("intent", "general")
     employee_id = state.get("employee_id")
     print(f"[HR Agent] Handling '{intent}' request…")
 
@@ -505,10 +427,9 @@ def build_hr_graph():
     tool_node = ToolNode(HR_TOOLS)
 
     graph = StateGraph(HRState)
-
     graph.add_node("classify_intent", classify_intent)
-    graph.add_node("hr_agent", hr_agent_node)
-    graph.add_node("tools", tool_node)
+    graph.add_node("hr_agent",        hr_agent_node)
+    graph.add_node("tools",           tool_node)
 
     graph.add_edge(START, "classify_intent")
     graph.add_edge("classify_intent", "hr_agent")

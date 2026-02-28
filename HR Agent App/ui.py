@@ -10,7 +10,10 @@ from typing import Any
 import streamlit as st
 from langchain_core.messages import HumanMessage
 
-from hr_agent import EMPLOYEES, build_hr_graph
+from hr_agent import build_hr_graph
+from hr_database import fetch_all_employees
+
+EMPLOYEES = {e["employee_id"]: e for e in fetch_all_employees()}
 
 # ─────────────────────────────────────────────
 # Page Config
