@@ -1,8 +1,15 @@
+from datetime import datetime
+
 from phi.agent import Agent
 from phi.model.openai import OpenAIChat
 from phi.tools.duckduckgo import DuckDuckGo
 
 from dotenv import load_dotenv
+
+
+def get_current_datetime() -> str:
+    """Returns the current date and time."""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 load_dotenv()
 
@@ -16,11 +23,12 @@ def create_websearch_agent():
             "Always search for the most recent information.",
             "Include sources in your responses.",
             "Summarize findings clearly.",
+            "Use the get_current_datetime tool to get today's date and time when the query involves current events, recent news, or time-sensitive information.",
         ],
         show_tool_calls=True,
         markdown=True,
         debug_mode=False, 
-        tools=[DuckDuckGo()] 
+        tools=[DuckDuckGo(), get_current_datetime]
     )
     return agent
 
