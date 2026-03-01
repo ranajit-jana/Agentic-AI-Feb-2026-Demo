@@ -120,6 +120,50 @@ python agent_team.py
 
 ---
 
+### 5. `sqlite_agent.py` — SQL data analyst agent
+
+An agent that queries a SQLite database (`data/sales_data.db`) and provides analytical insights. Supports two tool modes switchable at runtime:
+
+| Mode | Tools | When to use |
+|------|-------|-------------|
+| Built-in (`use_custom_tools=False`) | `SQLTools` (Phidata built-in) | Simple queries |
+| Custom (`use_custom_tools=True`) | `CustomSQLTools` from `tools.py` | Analytics with richer output |
+
+```bash
+python sqlite_agent.py
+```
+
+#### `CustomSQLTools` (tools.py)
+
+A `Toolkit` subclass exposing five registered tools:
+
+| Tool | Description |
+|------|-------------|
+| `execute_query` | Run any SQL query, returns results as a markdown table |
+| `get_schema` | Inspect column names, types, and a sample value for a table |
+| `get_sample_data` | Fetch the first N rows from a table |
+| `get_column_stats` | Count / min / max / avg / sum for a numeric column |
+| `search_data` | `LIKE` search across a column, returns up to 20 matching rows |
+
+#### Database schema
+
+The agent has access to a `sales` table:
+
+| Column | Description |
+|--------|-------------|
+| `date` | Transaction date |
+| `product` | Product name |
+| `category` | Product category |
+| `quantity` | Units sold |
+| `unit_price` | Price per unit |
+| `region` | Sales region |
+| `salesperson` | Salesperson name |
+| `customer_type` | Type of customer |
+| `total_revenue` | Total revenue for the transaction |
+| `month` | Month of the transaction |
+
+---
+
 ## Files
 
 | File | Description |
@@ -128,7 +172,10 @@ python agent_team.py
 | `agent_with_websearch.py` | Web search, scraping, and datetime tools |
 | `agent_with_kb.py` | RAG agent with LanceDB knowledge base |
 | `agent_team.py` | Multi-agent team with web + finance specialists |
+| `sqlite_agent.py` | SQL analyst agent querying a SQLite sales database |
+| `tools.py` | `CustomSQLTools` toolkit with schema, stats, and search tools |
 | `data/sample_article.txt` | Sample article loaded into the knowledge base |
+| `data/sales_data.db` | SQLite database used by the SQL agent |
 | `requirements.txt` | Python dependencies |
 | `.gitignore` | Excludes `tmp/` (LanceDB) and `.env` |
 
