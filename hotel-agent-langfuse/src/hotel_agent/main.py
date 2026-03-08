@@ -3,15 +3,30 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
 
+# LangSmith env vars must be set BEFORE importing LangChain/LangGraph modules
+# so the tracing client is configured before any lazy initialization occurs.
+from hotel_agent.config import settings
+
+if settings.langsmith_tracing and settings.langsmith_api_key:
+    # Set both legacy (LANGCHAIN_*) and current (LANGSMITH_*) env var names —
+    # langsmith 0.3+ prefers LANGSMITH_* but langchain-core still reads LANGCHAIN_*.
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    os.environ["LANGSMITH_TRACING"] = "true"
+    os.environ["LANGCHAIN_API_KEY"] = settings.langsmith_api_key
+    os.environ["LANGSMITH_API_KEY"] = settings.langsmith_api_key
+    os.environ["LANGCHAIN_PROJECT"] = settings.langsmith_project
+    os.environ["LANGSMITH_PROJECT"] = settings.langsmith_project
+
 from fastapi import FastAPI, HTTPException
 from langchain_core.messages import HumanMessage
+from langchain_core.tracers.langchain import LangChainTracer
 
 from hotel_agent.agents.db_agent import db_agent
 from hotel_agent.agents.mcp_agent import mcp_agent, register_all_tools
-from hotel_agent.config import settings
 from hotel_agent.graph.workflow import app_graph
 from hotel_agent.models.schemas import AgentState, ChatRequest, ChatResponse, HealthResponse
 from hotel_agent.observability.evaluation import evaluate_response
@@ -32,6 +47,9 @@ from hotel_agent.observability.tracing import (
 logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger(__name__)
 
+if settings.langsmith_tracing and settings.langsmith_api_key:
+    logger.info("LangSmith tracing enabled for project: %s", settings.langsmith_project)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,7 +59,7 @@ async def lifespan(app: FastAPI):
     logger.info("MCP Agent: %s", mcp_agent.get_status())
     logger.info("DB Agent: %s", db_agent.check_health())
     yield
-    logger.info("Shutting down — flushing Langfuse...")
+    logger.info("Shutting down — flushing Langfuse and LangSmith...")
     flush()
 
 
@@ -91,8 +109,13 @@ async def chat(request: ChatRequest) -> ChatResponse:
     }
 
     try:
+        # Build run config — LangGraph propagates callbacks to every node
+        run_config: dict = {}
+        if settings.langsmith_tracing and settings.langsmith_api_key:
+            run_config["callbacks"] = [LangChainTracer(project_name=settings.langsmith_project)]
+
         # Run the LangGraph workflow
-        final_state = await app_graph.ainvoke(initial_state)
+        final_state = await app_graph.ainvoke(initial_state, config=run_config)
 
         # Extract the final response
         ai_messages = [m for m in final_state["messages"] if hasattr(m, "type") and m.type == "ai"]
@@ -148,15 +171,17 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
-    """System health check including Langfuse and ChromaDB status."""
+    """System health check including Langfuse, LangSmith, and ChromaDB status."""
     lf_ok = langfuse_health()
     db_health = db_agent.check_health()
     kb_ready = db_health.get("knowledge_base", {}).get("status") == "ready"
+    ls_enabled = bool(os.environ.get("LANGSMITH_TRACING") == "true" and os.environ.get("LANGSMITH_API_KEY"))
 
     return HealthResponse(
         status="healthy" if lf_ok else "degraded",
         langfuse_connected=lf_ok,
         chromadb_ready=kb_ready,
+        langsmith_enabled=ls_enabled,
     )
 
 

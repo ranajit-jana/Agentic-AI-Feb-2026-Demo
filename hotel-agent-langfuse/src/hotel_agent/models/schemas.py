@@ -67,6 +67,7 @@ class HealthResponse(BaseModel):
     status: str
     langfuse_connected: bool
     chromadb_ready: bool
+    langsmith_enabled: bool = False
 
 
 # --- Tool Models ---
